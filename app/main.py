@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -15,7 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 from app.database import DB_PATH, get_db_connection, init_db
 from app.renderer import generate_report_pdf, REPORTS_DIR
 
-# Ensure tables and directory are initialized
+# Ensure database tables and reports directory are ready
 init_db(DB_PATH)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -37,14 +37,42 @@ def health_check():
     return {"status": "ok"}
 
 
-@app.post("/reports", status_code=status.HTTP_201_CREATED)
-async def generate_report(request: Optional[GenerateReportRequest] = None, response: Response = None):
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+@app.post("/reports")
+async def generate_report(request: Optional[GenerateReportRequest] = None):
+    force = request.force if request else False
+    today_prefix = datetime.now().strftime("%Y-%m-%d")
 
     with get_db_connection(DB_PATH) as conn:
         cursor = conn.cursor()
 
-        # Insert placeholder or pre-allocate id
+        # Idempotency Check: if not forced, return existing report generated today
+        if not force:
+            cursor.execute(
+                """
+                SELECT id, path, created_at FROM reports
+                WHERE created_at LIKE ? AND path != 'pending'
+                ORDER BY id DESC
+                LIMIT 1;
+                """,
+                (f"{today_prefix}%",),
+            )
+            existing = cursor.fetchone()
+            if existing:
+                pdf_path = Path(existing["path"])
+                if pdf_path.exists():
+                    # Return 200 OK with existing report details
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content={
+                            "id": existing["id"],
+                            "file": f"/reports/{existing['id']}/file",
+                            "cached": True,
+                        },
+                    )
+
+        # Fresh generation required (first run of day or forced)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         cursor.execute(
             "INSERT INTO reports (path, created_at) VALUES (?, ?);",
             ("pending", now_str),
@@ -55,23 +83,25 @@ async def generate_report(request: Optional[GenerateReportRequest] = None, respo
         pdf_filename = f"{report_id}.pdf"
         pdf_path = REPORTS_DIR / pdf_filename
 
-        # Render PDF document
+        # Render PDF via Playwright
         await generate_report_pdf(db_path=DB_PATH, output_path=pdf_path)
 
-        # Update path in database
+        # Update report path in database
         cursor.execute(
             "UPDATE reports SET path = ? WHERE id = ?;",
             (str(pdf_path), report_id),
         )
         conn.commit()
 
-        if response:
-            response.status_code = status.HTTP_201_CREATED
-
-        return {
-            "id": report_id,
-            "file": f"/reports/{report_id}/file",
-        }
+        # Return 201 Created for new generation
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content={
+                "id": report_id,
+                "file": f"/reports/{report_id}/file",
+                "cached": False,
+            },
+        )
 
 
 @app.get("/reports")
