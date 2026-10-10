@@ -1,4 +1,4 @@
-# FlyRank PDF Report Generator (Week 4 • Assignment A8)
+# FlyRank PDF Report Generator 
 
 A robust data-to-document backend pipeline built with **Python 3.12**, **FastAPI**, **SQLite**, and **Playwright Headless Chromium**. This system executes aggregated SQL analytics across transaction records, renders them into an executive multi-page PDF document with print CSS pagination rules, and serves the generated artifacts idempotently by link.
 
